@@ -52,11 +52,11 @@ jobs:
           # Fix 5: Zwangs-Selects für SUSFS und KPM aus Kconfig entfernen
           find drivers/kernelsu -name "Kconfig*" -exec sed -i '/select KSU_SUSFS/d; /select KPM/d; /select KSU_KPM/d' {} +
 
-          # Fix 6: Manuelle Kernel-Hooks für Non-GKI 4.19 einfügen (damit SukiSU-Manager den Kernel erkennt)
+          # Fix 6: Manuelle Kernel-Hooks für Non-GKI 4.19 einfügen
           python3 - << 'PYEOF'
           import os, re, subprocess
 
-          ksu_syms = subprocess.check_output(["grep", "-rn", "ksu_handle_", "drivers/kernelsu/"], text=True)
+          ksu_syms = subprocess.check_output(["grep", "-rn", "ksu_", "drivers/kernelsu/"], text=True)
 
           def patch_file(path, check_sym, patch_fn):
               if check_sym not in ksu_syms:
@@ -72,7 +72,7 @@ jobs:
               else:
                   print(f"[WARN] Muster in {path} nicht gefunden!")
 
-          # 1. kernel/reboot.c -> ksu_handle_sys_reboot (entscheidend für Manager-Erkennung)
+          # 1. kernel/reboot.c -> ksu_handle_sys_reboot
           def patch_reboot(c):
               decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
               c = re.sub(r'(SYSCALL_DEFINE4\(reboot,)', decl + r'\1', c, count=1)
@@ -81,11 +81,24 @@ jobs:
               return c
           patch_file("kernel/reboot.c", "ksu_handle_sys_reboot", patch_reboot)
 
-          # 2. fs/exec.c -> ksu_handle_execveat / sucompat
+          # 2. fs/exec.c -> ksu_handle_execveat (kompatibel mit __do_execve_file & do_execveat_common)
           def patch_exec(c):
-              decl = "#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n"
-              c = re.sub(r'(static int do_execveat_common\()', decl + r'\1', c, count=1)
-              hook = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\t"
+              has_hook_flag = "ksu_execveat_hook" in ksu_syms
+              has_sucompat = "ksu_handle_execveat_sucompat" in ksu_syms
+              decl = "#ifdef CONFIG_KSU\n"
+              if has_hook_flag:
+                  decl += "extern bool ksu_execveat_hook __read_mostly;\n"
+              decl += "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
+              if has_sucompat:
+                  decl += "extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
+              decl += "#endif\n"
+
+              c = re.sub(r'(#include <linux/fs\.h>)', r'\1\n' + decl, c, count=1)
+
+              if has_hook_flag and has_sucompat:
+                  hook = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\t"
+              else:
+                  hook = "#ifdef CONFIG_KSU\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\t"
               c = re.sub(r'(if \(IS_ERR\(filename\)\))', hook + r'\1', c, count=1)
               return c
           patch_file("fs/exec.c", "ksu_handle_execveat", patch_exec)
@@ -110,10 +123,17 @@ jobs:
 
           # 5. fs/read_write.c -> ksu_handle_vfs_read
           def patch_rw(c):
-              decl = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\n\n"
+              has_read_flag = "ksu_vfs_read_hook" in ksu_syms
+              decl = "#ifdef CONFIG_KSU\n"
+              if has_read_flag:
+                  decl += "extern bool ksu_vfs_read_hook __read_mostly;\n"
+              decl += "extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\n\n"
               c = re.sub(r'(ssize_t vfs_read\()', decl + r'\1', c, count=1)
-              c = re.sub(r'(ssize_t vfs_read\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
-                         r'\1#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n', c, count=1)
+              if has_read_flag:
+                  hook = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
+              else:
+                  hook = "#ifdef CONFIG_KSU\n\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
+              c = re.sub(r'(ssize_t vfs_read\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)', r'\1' + hook, c, count=1)
               return c
           patch_file("fs/read_write.c", "ksu_handle_vfs_read", patch_rw)
 
