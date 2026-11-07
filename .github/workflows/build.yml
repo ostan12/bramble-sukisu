@@ -61,8 +61,21 @@ jobs:
       - name: Package AnyKernel3
         run: |
           cd work
-          cp kernel/out/arch/arm64/boot/Image.lz4 AnyKernel3/
+          echo "=== Inhalt von boot-Verzeichnis ==="
+          ls -lh kernel/out/arch/arm64/boot/
+          
+          # Suche automatisch das gebaute Kernel-Image (lz4-dtb, lz4, gz-dtb, gz oder Image)
+          for img in Image.lz4-dtb Image.lz4 Image.gz-dtb Image.gz Image; do
+            if [ -f "kernel/out/arch/arm64/boot/$img" ]; then
+              echo "Verwende Kernel-Image: $img"
+              cp "kernel/out/arch/arm64/boot/$img" AnyKernel3/
+              break
+            fi
+          done
+
           [ -f kernel/out/arch/arm64/boot/dtbo.img ] && cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
+          [ -f kernel/out/arch/arm64/boot/dtb.img ] && cp kernel/out/arch/arm64/boot/dtb.img AnyKernel3/
+
           cd AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=bramble/' anykernel.sh
           sed -i 's/device.name2=toro/device.name2=redfin/' anykernel.sh
