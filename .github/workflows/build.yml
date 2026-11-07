@@ -81,11 +81,11 @@ jobs:
               return c
           patch_file("kernel/reboot.c", "ksu_handle_sys_reboot", patch_reboot)
 
-          # 2. fs/exec.c -> ksu_handle_execveat (kompatibel mit __do_execve_file & do_execveat_common)
+          # 2. fs/exec.c -> ksu_handle_execveat (Deklarationen direkt nach erstem #include)
           def patch_exec(c):
               has_hook_flag = "ksu_execveat_hook" in ksu_syms
               has_sucompat = "ksu_handle_execveat_sucompat" in ksu_syms
-              decl = "#ifdef CONFIG_KSU\n"
+              decl = "#ifdef CONFIG_KSU\nstruct filename;\n"
               if has_hook_flag:
                   decl += "extern bool ksu_execveat_hook __read_mostly;\n"
               decl += "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
@@ -93,7 +93,7 @@ jobs:
                   decl += "extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
               decl += "#endif\n"
 
-              c = re.sub(r'(#include <linux/fs\.h>)', r'\1\n' + decl, c, count=1)
+              c = re.sub(r'(#include\s*[<"][^>"]+[>"])', r'\1\n' + decl, c, count=1)
 
               if has_hook_flag and has_sucompat:
                   hook = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\t"
