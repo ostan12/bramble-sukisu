@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev make zip unzip python3 cpio libelf-dev dwarves git curl gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y bc bison flex libssl-dev make zip unzip python3 cpio libelf-dev dwarves git curl lz4 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Clone LineageOS redbull kernel & Toolchain
         run: |
@@ -39,12 +39,12 @@ jobs:
             sed -i 's/->vdso_clock_mode/->rating/g' drivers/kernelsu/extension/cpu_spoof.c
           fi
 
-          # Fix 3: access_ok auf Kernel 4.19 benötigt 3 Argumente (falls kpm.c mitgebaut wird)
+          # Fix 3: access_ok auf Kernel 4.19 benötigt 3 Argumente
           if [ -f drivers/kernelsu/extension/kpm/kpm.c ]; then
             sed -i 's/access_ok(/access_ok(VERIFY_WRITE, /g' drivers/kernelsu/extension/kpm/kpm.c
           fi
 
-          # Fix 4: SUSFS-Aufrufe in pkg_observer.c abfangen, falls SUSFS nicht im Kernel ist
+          # Fix 4: SUSFS-Aufrufe in pkg_observer.c abfangen
           if [ -f drivers/kernelsu/manager/pkg_observer.c ]; then
             sed -i '1i #ifndef CONFIG_KSU_SUSFS\n#define susfs_parse_priority_app_strings(...) (0)\n#endif' drivers/kernelsu/manager/pkg_observer.c
           fi
@@ -54,17 +54,22 @@ jobs:
 
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
           echo "Verwende defconfig: $DEFCONFIG"
-          cat << 'EOF' >> "$DEFCONFIG"
-          CONFIG_KSU=y
-          CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
-          CONFIG_KALLSYMS=y
-          CONFIG_KALLSYMS_ALL=y
-          # CONFIG_KSU_SUSFS is not set
-          # CONFIG_KPM is not set
-          # CONFIG_KSU_KPM is not set
-          EOF
+          printf '%s\n' \
+            "CONFIG_KSU=y" \
+            "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" \
+            "CONFIG_KALLSYMS=y" \
+            "CONFIG_KALLSYMS_ALL=y" \
+            "# CONFIG_KSU_SUSFS is not set" \
+            "# CONFIG_KPM is not set" \
+            "# CONFIG_KSU_KPM is not set" >> "$DEFCONFIG"
 
-      - name: Compile Kernel
+          # Sauberer Git-Status, damit kein "-dirty" an die Kernel-Version (WLAN-Module!) gehängt wird
+          git config user.email "builder@local"
+          git config user.name "builder"
+          git add -A
+          git commit -m "Integrate SukiSU-Ultra" || true
+
+      - name: Compile Kernel (Image.lz4)
         run: |
           set -o pipefail
           cd work/kernel
@@ -76,7 +81,6 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             "$DEFCONFIG_REL"
 
-          # SUSFS und KPM explizit in out/.config deaktivieren und auflösen
           ./scripts/config --file out/.config -d KSU_SUSFS -d KPM -d KSU_KPM
           for cfg in $(grep -h "^config " drivers/kernelsu/Kconfig drivers/kernelsu/*/Kconfig 2>/dev/null | awk '{print $2}' | grep -iE "SUSFS|SPOOF|KPM"); do
             ./scripts/config --file out/.config -d "$cfg"
@@ -85,14 +89,12 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
 
-          echo "=== Aktive KSU-Konfiguration ==="
-          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_KALLSYMS" out/.config || true
-
+          # Baue gezielt Image.lz4 (umgeht den nicht benötigten dtbs-Target-Fehler)
           if ! make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            KCFLAGS="-Wno-error" 2>&1 | tee build.log; then
+            KCFLAGS="-Wno-error" DTC_FLAGS="-f" Image.lz4 2>&1 | tee build.log; then
             echo "=== FEHLER IM BUILD-LOG ==="
-            grep -iE "error:|undefined reference|fatal error|No rule to make" build.log | tail -n 30
+            grep -iE "error:|ERROR \(|undefined reference|fatal error|No rule to make" build.log | tail -n 30
             exit 1
           fi
 
@@ -109,9 +111,6 @@ jobs:
               break
             fi
           done
-
-          [ -f kernel/out/arch/arm64/boot/dtbo.img ] && cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
-          [ -f kernel/out/arch/arm64/boot/dtb.img ] && cp kernel/out/arch/arm64/boot/dtb.img AnyKernel3/
 
           cd AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=bramble/' anykernel.sh
