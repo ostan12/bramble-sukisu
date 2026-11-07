@@ -25,7 +25,7 @@ jobs:
           git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r487747c.git clang
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
 
-      - name: Integrate SukiSU-Ultra & patch defconfig
+      - name: Integrate SukiSU-Ultra, Manual Hooks & defconfig
         run: |
           cd work/kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
@@ -52,22 +52,96 @@ jobs:
           # Fix 5: Zwangs-Selects für SUSFS und KPM aus Kconfig entfernen
           find drivers/kernelsu -name "Kconfig*" -exec sed -i '/select KSU_SUSFS/d; /select KPM/d; /select KSU_KPM/d' {} +
 
+          # Fix 6: Manuelle Kernel-Hooks für Non-GKI 4.19 einfügen (damit SukiSU-Manager den Kernel erkennt)
+          python3 - << 'PYEOF'
+          import os, re, subprocess
+
+          ksu_syms = subprocess.check_output(["grep", "-rn", "ksu_handle_", "drivers/kernelsu/"], text=True)
+
+          def patch_file(path, check_sym, patch_fn):
+              if check_sym not in ksu_syms:
+                  print(f"[SKIP] {path}: {check_sym} nicht in SukiSU vorhanden")
+                  return
+              with open(path, "r") as f:
+                  content = f.read()
+              new_content = patch_fn(content)
+              if new_content != content:
+                  with open(path, "w") as f:
+                      f.write(new_content)
+                  print(f"[OK] {path} gepatcht ({check_sym})")
+              else:
+                  print(f"[WARN] Muster in {path} nicht gefunden!")
+
+          # 1. kernel/reboot.c -> ksu_handle_sys_reboot (entscheidend für Manager-Erkennung)
+          def patch_reboot(c):
+              decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
+              c = re.sub(r'(SYSCALL_DEFINE4\(reboot,)', decl + r'\1', c, count=1)
+              c = re.sub(r'(SYSCALL_DEFINE4\(reboot,[^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
+                         r'\1#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n', c, count=1)
+              return c
+          patch_file("kernel/reboot.c", "ksu_handle_sys_reboot", patch_reboot)
+
+          # 2. fs/exec.c -> ksu_handle_execveat / sucompat
+          def patch_exec(c):
+              decl = "#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n"
+              c = re.sub(r'(static int do_execveat_common\()', decl + r'\1', c, count=1)
+              hook = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\t"
+              c = re.sub(r'(if \(IS_ERR\(filename\)\))', hook + r'\1', c, count=1)
+              return c
+          patch_file("fs/exec.c", "ksu_handle_execveat", patch_exec)
+
+          # 3. fs/open.c -> ksu_handle_faccessat
+          def patch_open(c):
+              decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
+              c = re.sub(r'(long do_faccessat\()', decl + r'\1', c, count=1)
+              c = re.sub(r'(long do_faccessat\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
+                         r'\1#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n', c, count=1)
+              return c
+          patch_file("fs/open.c", "ksu_handle_faccessat", patch_open)
+
+          # 4. fs/stat.c -> ksu_handle_stat
+          def patch_stat(c):
+              decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\n"
+              c = re.sub(r'(int vfs_statx\()', decl + r'\1', c, count=1)
+              c = re.sub(r'(int vfs_statx\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
+                         r'\1#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif\n', c, count=1)
+              return c
+          patch_file("fs/stat.c", "ksu_handle_stat", patch_stat)
+
+          # 5. fs/read_write.c -> ksu_handle_vfs_read
+          def patch_rw(c):
+              decl = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\n\n"
+              c = re.sub(r'(ssize_t vfs_read\()', decl + r'\1', c, count=1)
+              c = re.sub(r'(ssize_t vfs_read\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
+                         r'\1#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n', c, count=1)
+              return c
+          patch_file("fs/read_write.c", "ksu_handle_vfs_read", patch_rw)
+
+          # 6. kernel/sys.c -> ksu_handle_setresuid
+          def patch_sys(c):
+              decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif\n\n"
+              c = re.sub(r'(long __sys_setresuid\()', decl + r'\1', c, count=1)
+              c = re.sub(r'(long __sys_setresuid\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
+                         r'\1#ifdef CONFIG_KSU\n\tksu_handle_setresuid(ruid, euid, suid);\n#endif\n', c, count=1)
+              return c
+          patch_file("kernel/sys.c", "ksu_handle_setresuid", patch_sys)
+          PYEOF
+
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
           echo "Verwende defconfig: $DEFCONFIG"
           printf '%s\n' \
             "CONFIG_KSU=y" \
-            "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" \
+            "CONFIG_KSU_MANUAL_HOOK=y" \
             "CONFIG_KALLSYMS=y" \
             "CONFIG_KALLSYMS_ALL=y" \
             "# CONFIG_KSU_SUSFS is not set" \
             "# CONFIG_KPM is not set" \
             "# CONFIG_KSU_KPM is not set" >> "$DEFCONFIG"
 
-          # Sauberer Git-Status, damit kein "-dirty" an die Kernel-Version (WLAN-Module!) gehängt wird
           git config user.email "builder@local"
           git config user.name "builder"
           git add -A
-          git commit -m "Integrate SukiSU-Ultra" || true
+          git commit -m "Integrate SukiSU-Ultra with manual hooks" || true
 
       - name: Compile Kernel (Image.lz4)
         run: |
@@ -89,7 +163,6 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
 
-          # Baue gezielt Image.lz4 (umgeht den nicht benötigten dtbs-Target-Fehler)
           if ! make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             KCFLAGS="-Wno-error" DTC_FLAGS="-f" Image.lz4 2>&1 | tee build.log; then
@@ -101,9 +174,6 @@ jobs:
       - name: Package AnyKernel3
         run: |
           cd work
-          echo "=== Inhalt von boot-Verzeichnis ==="
-          ls -lh kernel/out/arch/arm64/boot/
-
           for img in Image.lz4-dtb Image.lz4 Image.gz-dtb Image.gz Image; do
             if [ -f "kernel/out/arch/arm64/boot/$img" ]; then
               echo "Verwende Kernel-Image: $img"
@@ -115,8 +185,8 @@ jobs:
           cd AnyKernel3
           sed -i 's/device.name1=maguro/device.name1=bramble/' anykernel.sh
           sed -i 's/device.name2=toro/device.name2=redfin/' anykernel.sh
-          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
-          sed -i 's/is_slot_device=0;/is_slot_device=1;/' anykernel.sh
+          sed -i 's|BLOCK=.*;|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=1;/' anykernel.sh
           zip -r9 "$GITHUB_WORKSPACE/SukiSU-bramble.zip" * -x .git README.md *placeholder
 
       - name: Upload Kernel ZIP
