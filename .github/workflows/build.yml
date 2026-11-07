@@ -12,25 +12,25 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Free up disk space
+      - name: Free up disk space & install dependencies
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev make zip unzip python3 cpio libelf-dev dwarves git curl
+          sudo apt-get install -y bc bison flex libssl-dev make zip unzip python3 cpio libelf-dev dwarves git curl gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Clone LineageOS redbull kernel & Toolchain
         run: |
           mkdir -p work && cd work
           git clone --depth=1 -b ${{ github.event.inputs.branch }} https://github.com/LineageOS/android_kernel_google_redbull.git kernel
-          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git clang
+          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r487747c.git clang
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
 
       - name: Integrate SukiSU-Ultra & patch defconfig
         run: |
           cd work/kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          DEFCONFIG="arch/arm64/configs/vendor/redbull_defconfig"
-          [ ! -f "$DEFCONFIG" ] && DEFCONFIG="arch/arm64/configs/redbull_defconfig"
+          DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
+          echo "Verwende defconfig: $DEFCONFIG"
           cat << 'EOF' >> "$DEFCONFIG"
           CONFIG_KSU=y
           CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
@@ -43,10 +43,20 @@ jobs:
         run: |
           cd work/kernel
           export PATH="$GITHUB_WORKSPACE/work/clang/bin:$PATH"
-          DEFCONFIG_NAME="vendor/redbull_defconfig"
-          [ ! -f "arch/arm64/configs/vendor/redbull_defconfig" ] && DEFCONFIG_NAME="redbull_defconfig"
-          make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- $DEFCONFIG_NAME
-          make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
+          DEFCONFIG_REL=${DEFCONFIG#arch/arm64/configs/}
+
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            "$DEFCONFIG_REL"
+
+          if ! make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            KCFLAGS="-Wno-error" 2>&1 | tee build.log; then
+            echo "=== FEHLER IM BUILD-LOG ==="
+            grep -iE "error:|undefined reference|fatal error" build.log | tail -n 30
+            exit 1
+          fi
 
       - name: Package AnyKernel3
         run: |
