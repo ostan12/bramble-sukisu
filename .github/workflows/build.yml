@@ -30,19 +30,24 @@ jobs:
           cd work/kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-          # Fix für Kernel 4.19: verhindert fälschliches Einbinden von linux/static_call.h
+          # Fix 1: verhindert fälschliches Einbinden von linux/static_call.h auf Kernel 4.19
           sed -i 's/static_call.h/static_call_disabled_for_4_19.h/g' drivers/kernelsu/Makefile
           sed -i 's|#include <linux/static_call.h>|/* disabled on 4.19 */|g' drivers/kernelsu/kernel_includes.h
+
+          # Fix 2: Fallback für vdso_clock_mode in cpu_spoof.c (existiert erst ab Kernel 5.x)
+          if [ -f drivers/kernelsu/extension/cpu_spoof.c ]; then
+            sed -i 's/->vdso_clock_mode/->rating/g' drivers/kernelsu/extension/cpu_spoof.c
+          fi
 
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
           echo "Verwende defconfig: $DEFCONFIG"
           cat << 'EOF' >> "$DEFCONFIG"
           CONFIG_KSU=y
-          CONFIG_KSU_SUSFS=n
           CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
-          CONFIG_KPM=y
+          # CONFIG_KSU_SUSFS is not set
+          # CONFIG_KPM is not set
           EOF
 
       - name: Compile Kernel
@@ -56,6 +61,15 @@ jobs:
           make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             "$DEFCONFIG_REL"
+
+          # SUSFS, KPM und CPU_SPOOF sauber direkt in out/.config deaktivieren
+          ./scripts/config --file out/.config -d KSU_SUSFS -d KPM
+          for cfg in $(grep -h "^config " drivers/kernelsu/Kconfig drivers/kernelsu/*/Kconfig 2>/dev/null | awk '{print $2}' | grep -iE "SUSFS|SPOOF|KPM"); do
+            ./scripts/config --file out/.config -d "$cfg"
+          done
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            olddefconfig
 
           if ! make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
