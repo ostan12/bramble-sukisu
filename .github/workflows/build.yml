@@ -52,7 +52,7 @@ jobs:
           # Fix 5: Zwangs-Selects für SUSFS und KPM aus Kconfig entfernen
           find drivers/kernelsu -name "Kconfig*" -exec sed -i '/select KSU_SUSFS/d; /select KPM/d; /select KSU_KPM/d' {} +
 
-          # Fix 6: Manuelle Kernel-Hooks für Non-GKI 4.19 einfügen
+          # Fix 6: Manuelle Kernel-Hooks für Non-GKI 4.19 einfügen (setresuid läuft über LSM-Hook)
           python3 - << 'PYEOF'
           import os, re, subprocess
 
@@ -81,7 +81,7 @@ jobs:
               return c
           patch_file("kernel/reboot.c", "ksu_handle_sys_reboot", patch_reboot)
 
-          # 2. fs/exec.c -> ksu_handle_execveat (Deklarationen direkt nach erstem #include)
+          # 2. fs/exec.c -> ksu_handle_execveat
           def patch_exec(c):
               has_hook_flag = "ksu_execveat_hook" in ksu_syms
               has_sucompat = "ksu_handle_execveat_sucompat" in ksu_syms
@@ -136,15 +136,6 @@ jobs:
               c = re.sub(r'(ssize_t vfs_read\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)', r'\1' + hook, c, count=1)
               return c
           patch_file("fs/read_write.c", "ksu_handle_vfs_read", patch_rw)
-
-          # 6. kernel/sys.c -> ksu_handle_setresuid
-          def patch_sys(c):
-              decl = "#ifdef CONFIG_KSU\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif\n\n"
-              c = re.sub(r'(long __sys_setresuid\()', decl + r'\1', c, count=1)
-              c = re.sub(r'(long __sys_setresuid\([^{]+\{[^\n]*\n(?:[ \t]+[^\n]*;[ \t]*\n)+)',
-                         r'\1#ifdef CONFIG_KSU\n\tksu_handle_setresuid(ruid, euid, suid);\n#endif\n', c, count=1)
-              return c
-          patch_file("kernel/sys.c", "ksu_handle_setresuid", patch_sys)
           PYEOF
 
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
