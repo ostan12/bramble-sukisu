@@ -29,10 +29,16 @@ jobs:
         run: |
           cd work/kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+
+          # Fix für Kernel 4.19: verhindert fälschliches Einbinden von linux/static_call.h
+          sed -i 's/static_call.h/static_call_disabled_for_4_19.h/g' drivers/kernelsu/Makefile
+          sed -i 's|#include <linux/static_call.h>|/* disabled on 4.19 */|g' drivers/kernelsu/kernel_includes.h
+
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
           echo "Verwende defconfig: $DEFCONFIG"
           cat << 'EOF' >> "$DEFCONFIG"
           CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=n
           CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
@@ -41,6 +47,7 @@ jobs:
 
       - name: Compile Kernel
         run: |
+          set -o pipefail
           cd work/kernel
           export PATH="$GITHUB_WORKSPACE/work/clang/bin:$PATH"
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
@@ -54,7 +61,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             KCFLAGS="-Wno-error" 2>&1 | tee build.log; then
             echo "=== FEHLER IM BUILD-LOG ==="
-            grep -iE "error:|undefined reference|fatal error" build.log | tail -n 30
+            grep -iE "error:|undefined reference|fatal error|No rule to make" build.log | tail -n 30
             exit 1
           fi
 
@@ -63,8 +70,7 @@ jobs:
           cd work
           echo "=== Inhalt von boot-Verzeichnis ==="
           ls -lh kernel/out/arch/arm64/boot/
-          
-          # Suche automatisch das gebaute Kernel-Image (lz4-dtb, lz4, gz-dtb, gz oder Image)
+
           for img in Image.lz4-dtb Image.lz4 Image.gz-dtb Image.gz Image; do
             if [ -f "kernel/out/arch/arm64/boot/$img" ]; then
               echo "Verwende Kernel-Image: $img"
