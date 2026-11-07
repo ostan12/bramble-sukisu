@@ -39,6 +39,19 @@ jobs:
             sed -i 's/->vdso_clock_mode/->rating/g' drivers/kernelsu/extension/cpu_spoof.c
           fi
 
+          # Fix 3: access_ok auf Kernel 4.19 benötigt 3 Argumente (falls kpm.c mitgebaut wird)
+          if [ -f drivers/kernelsu/extension/kpm/kpm.c ]; then
+            sed -i 's/access_ok(/access_ok(VERIFY_WRITE, /g' drivers/kernelsu/extension/kpm/kpm.c
+          fi
+
+          # Fix 4: SUSFS-Aufrufe in pkg_observer.c abfangen, falls SUSFS nicht im Kernel ist
+          if [ -f drivers/kernelsu/manager/pkg_observer.c ]; then
+            sed -i '1i #ifndef CONFIG_KSU_SUSFS\n#define susfs_parse_priority_app_strings(...) (0)\n#endif' drivers/kernelsu/manager/pkg_observer.c
+          fi
+
+          # Fix 5: Zwangs-Selects für SUSFS und KPM aus Kconfig entfernen
+          find drivers/kernelsu -name "Kconfig*" -exec sed -i '/select KSU_SUSFS/d; /select KPM/d; /select KSU_KPM/d' {} +
+
           DEFCONFIG=$(find arch/arm64/configs -name "redbull_defconfig" | head -n 1)
           echo "Verwende defconfig: $DEFCONFIG"
           cat << 'EOF' >> "$DEFCONFIG"
@@ -48,6 +61,7 @@ jobs:
           CONFIG_KALLSYMS_ALL=y
           # CONFIG_KSU_SUSFS is not set
           # CONFIG_KPM is not set
+          # CONFIG_KSU_KPM is not set
           EOF
 
       - name: Compile Kernel
@@ -62,14 +76,17 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             "$DEFCONFIG_REL"
 
-          # SUSFS, KPM und CPU_SPOOF sauber direkt in out/.config deaktivieren
-          ./scripts/config --file out/.config -d KSU_SUSFS -d KPM
+          # SUSFS und KPM explizit in out/.config deaktivieren und auflösen
+          ./scripts/config --file out/.config -d KSU_SUSFS -d KPM -d KSU_KPM
           for cfg in $(grep -h "^config " drivers/kernelsu/Kconfig drivers/kernelsu/*/Kconfig 2>/dev/null | awk '{print $2}' | grep -iE "SUSFS|SPOOF|KPM"); do
             ./scripts/config --file out/.config -d "$cfg"
           done
           make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
+
+          echo "=== Aktive KSU-Konfiguration ==="
+          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_KALLSYMS" out/.config || true
 
           if ! make -j$(nproc) O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
